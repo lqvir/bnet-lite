@@ -25,6 +25,8 @@ int main() {
             std::cout << ' ' << static_cast<int>(v);
         }
         std::cout << '\n';
+        std::cout << "client traffic tx/rx: " << client.sentBytes() << '/' << client.receivedBytes() << '\n';
+        std::cout << "server traffic tx/rx: " << server.sentBytes() << '/' << server.receivedBytes() << '\n';
 
         return 0;
     } catch (const std::exception& e) {

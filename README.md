@@ -23,6 +23,13 @@
 - 后接 payload
 
 这样能支持变长消息，避免 TCP 粘包拆包问题。
+可通过以下接口查看当前通道累计通信量统计（字节）：
+
+- `Channel::sentBytes()`
+- `Channel::receivedBytes()`
+- `Channel::resetTrafficStats()`
+
+说明：对帧协议接口（如 `sendString/recvString/asyncSendBytes/asyncRecvBytes`），统计的是链路上传输的字节数，即 `8` 字节长度头 + 序列化后 payload（启用压缩时为压缩后的大小）。
 
 另外提供了 `Channel::sendU32Payload(...)`，用于按 `uint32_t` 元素发送 payload。
 在 C++20 且标准库支持 `std::span` 时，可直接传 `std::span<const uint32_t>`。

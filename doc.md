@@ -85,18 +85,20 @@ server.recvString(msg);
 - asyncSendBytes(payload, callback)
 - asyncSendString(text, callback)
 
-
 - asyncSendBytes(payload)
 - asyncSendString(text)
 - asyncSendVector<T>(...)
 
 本地通道工厂：
-
-
+- Channel::makeLocalPair(nameA, nameB)
 
 - setCompressionMode(mode)
+- compressionMode()
 
-
+通信量统计：
+- sentBytes()
+- receivedBytes()
+- resetTrafficStats()
 
 - 对变长消息进行 pack/unpack
 - 按通道配置决定压缩模式
@@ -106,7 +108,9 @@ server.recvString(msg);
 ## 7. 协议说明
 所有 sendString/sendVector/asyncSendBytes 都是帧协议：
 
+- 帧头：8 字节大端长度（uint64_t）
 - 帧体：序列化后的 payload（可能已压缩）
+- 统计口径：帧协议接口的通信量统计包含帧头 + 帧体（压缩时按压缩后字节计）
 限制：
 
 - 超限会抛出异常或异步返回错误码（message_size）

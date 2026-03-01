@@ -47,6 +47,9 @@ public:
     const std::string& remoteName() const;
     void setCompressionMode(serialization::CompressionMode mode);
     serialization::CompressionMode compressionMode() const;
+    std::uint64_t sentBytes() const;
+    std::uint64_t receivedBytes() const;
+    void resetTrafficStats();
 
     void send(const void* data, std::size_t bytes);
     void recv(void* data, std::size_t bytes);

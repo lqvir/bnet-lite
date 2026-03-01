@@ -75,7 +75,11 @@ bool isLocalPipeOpen(const std::shared_ptr<LocalPipe>& pipe) {
     return !pipe->closed;
 }
 
-void localWriteExact(const std::shared_ptr<LocalEndpoint>& endpoint, const std::uint8_t* data, std::size_t bytes) {
+void localWriteExact(
+    const std::shared_ptr<LocalEndpoint>& endpoint,
+    const std::uint8_t* data,
+    std::size_t bytes,
+    std::atomic<std::uint64_t>* sentCounter) {
     if (!endpoint) {
         throw NetworkError("channel is not initialized");
     }
@@ -93,10 +97,18 @@ void localWriteExact(const std::shared_ptr<LocalEndpoint>& endpoint, const std::
         }
     }
 
+    if (sentCounter && bytes != 0) {
+        sentCounter->fetch_add(static_cast<std::uint64_t>(bytes), std::memory_order_relaxed);
+    }
+
     endpoint->outgoing->cv.notify_all();
 }
 
-void localReadExact(const std::shared_ptr<LocalEndpoint>& endpoint, std::uint8_t* data, std::size_t bytes) {
+void localReadExact(
+    const std::shared_ptr<LocalEndpoint>& endpoint,
+    std::uint8_t* data,
+    std::size_t bytes,
+    std::atomic<std::uint64_t>* recvCounter) {
     if (!endpoint) {
         throw NetworkError("channel is not initialized");
     }
@@ -116,10 +128,16 @@ void localReadExact(const std::shared_ptr<LocalEndpoint>& endpoint, std::uint8_t
         }
 
         if (copied == bytes) {
+            if (recvCounter && copied != 0) {
+                recvCounter->fetch_add(static_cast<std::uint64_t>(copied), std::memory_order_relaxed);
+            }
             return;
         }
 
         if (endpoint->incoming->closed) {
+            if (recvCounter && copied != 0) {
+                recvCounter->fetch_add(static_cast<std::uint64_t>(copied), std::memory_order_relaxed);
+            }
             throw NetworkError("channel is closed");
         }
     }
@@ -153,6 +171,8 @@ struct Channel::Impl {
     std::atomic<bool> closed{false};
     std::atomic<std::uint8_t> compressionMode{
         static_cast<std::uint8_t>(serialization::defaultCompressionMode())};
+    std::atomic<std::uint64_t> sentBytes{0};
+    std::atomic<std::uint64_t> receivedBytes{0};
 };
 
 Channel::Channel(std::shared_ptr<Impl> impl)
@@ -270,6 +290,28 @@ serialization::CompressionMode Channel::compressionMode() const {
         impl_->compressionMode.load(std::memory_order_acquire));
 }
 
+std::uint64_t Channel::sentBytes() const {
+    if (!impl_) {
+        throw NetworkError("channel is not initialized");
+    }
+    return impl_->sentBytes.load(std::memory_order_relaxed);
+}
+
+std::uint64_t Channel::receivedBytes() const {
+    if (!impl_) {
+        throw NetworkError("channel is not initialized");
+    }
+    return impl_->receivedBytes.load(std::memory_order_relaxed);
+}
+
+void Channel::resetTrafficStats() {
+    if (!impl_) {
+        throw NetworkError("channel is not initialized");
+    }
+    impl_->sentBytes.store(0, std::memory_order_relaxed);
+    impl_->receivedBytes.store(0, std::memory_order_relaxed);
+}
+
 void Channel::send(const void* data, std::size_t bytes) {
     if (!impl_) {
         throw NetworkError("channel is not initialized");
@@ -279,7 +321,11 @@ void Channel::send(const void* data, std::size_t bytes) {
         if (impl_->closed.load(std::memory_order_acquire)) {
             throw NetworkError("channel is closed");
         }
-        localWriteExact(impl_->localEndpoint, reinterpret_cast<const std::uint8_t*>(data), bytes);
+        localWriteExact(
+            impl_->localEndpoint,
+            reinterpret_cast<const std::uint8_t*>(data),
+            bytes,
+            &impl_->sentBytes);
         return;
     }
 
@@ -293,6 +339,9 @@ void Channel::send(const void* data, std::size_t bytes) {
                 throw NetworkError("channel is closed");
             }
             boost::asio::write(*impl->socket, boost::asio::buffer(data, bytes));
+            if (bytes != 0) {
+                impl->sentBytes.fetch_add(static_cast<std::uint64_t>(bytes), std::memory_order_relaxed);
+            }
             done->set_value();
         } catch (...) {
             done->set_exception(std::current_exception());
@@ -311,7 +360,11 @@ void Channel::recv(void* data, std::size_t bytes) {
         if (impl_->closed.load(std::memory_order_acquire)) {
             throw NetworkError("channel is closed");
         }
-        localReadExact(impl_->localEndpoint, reinterpret_cast<std::uint8_t*>(data), bytes);
+        localReadExact(
+            impl_->localEndpoint,
+            reinterpret_cast<std::uint8_t*>(data),
+            bytes,
+            &impl_->receivedBytes);
         return;
     }
 
@@ -325,6 +378,9 @@ void Channel::recv(void* data, std::size_t bytes) {
                 throw NetworkError("channel is closed");
             }
             boost::asio::read(*impl->socket, boost::asio::buffer(data, bytes));
+            if (bytes != 0) {
+                impl->receivedBytes.fetch_add(static_cast<std::uint64_t>(bytes), std::memory_order_relaxed);
+            }
             done->set_value();
         } catch (...) {
             done->set_exception(std::current_exception());
@@ -349,9 +405,13 @@ void Channel::sendFrame(const std::shared_ptr<Impl>& impl, const std::uint8_t* d
         }
 
         std::uint64_t len = boost::endian::native_to_big(static_cast<std::uint64_t>(wire.size()));
-        localWriteExact(impl->localEndpoint, reinterpret_cast<const std::uint8_t*>(&len), sizeof(len));
+        localWriteExact(
+            impl->localEndpoint,
+            reinterpret_cast<const std::uint8_t*>(&len),
+            sizeof(len),
+            &impl->sentBytes);
         if (!wire.empty()) {
-            localWriteExact(impl->localEndpoint, wire.data(), wire.size());
+            localWriteExact(impl->localEndpoint, wire.data(), wire.size(), &impl->sentBytes);
         }
         return;
     }
@@ -378,6 +438,9 @@ void Channel::sendFrame(const std::shared_ptr<Impl>& impl, const std::uint8_t* d
             if (!wire.empty()) {
                 boost::asio::write(*impl->socket, boost::asio::buffer(wire.data(), wire.size()));
             }
+            impl->sentBytes.fetch_add(
+                static_cast<std::uint64_t>(sizeof(len) + wire.size()),
+                std::memory_order_relaxed);
 
             done->set_value();
         } catch (...) {
@@ -395,7 +458,11 @@ std::vector<std::uint8_t> Channel::recvFrame(const std::shared_ptr<Impl>& impl) 
         }
 
         std::uint64_t len = 0;
-        localReadExact(impl->localEndpoint, reinterpret_cast<std::uint8_t*>(&len), sizeof(len));
+        localReadExact(
+            impl->localEndpoint,
+            reinterpret_cast<std::uint8_t*>(&len),
+            sizeof(len),
+            &impl->receivedBytes);
 
         len = boost::endian::big_to_native(len);
         if (len > kMaxFrameBytes) {
@@ -404,7 +471,7 @@ std::vector<std::uint8_t> Channel::recvFrame(const std::shared_ptr<Impl>& impl) 
 
         std::vector<std::uint8_t> payload(static_cast<std::size_t>(len));
         if (!payload.empty()) {
-            localReadExact(impl->localEndpoint, payload.data(), payload.size());
+            localReadExact(impl->localEndpoint, payload.data(), payload.size(), &impl->receivedBytes);
         }
 
         return serialization::unpack(payload);
@@ -421,6 +488,7 @@ std::vector<std::uint8_t> Channel::recvFrame(const std::shared_ptr<Impl>& impl) 
 
             std::uint64_t len = 0;
             boost::asio::read(*impl->socket, boost::asio::buffer(&len, sizeof(len)));
+            impl->receivedBytes.fetch_add(static_cast<std::uint64_t>(sizeof(len)), std::memory_order_relaxed);
 
             len = boost::endian::big_to_native(len);
             if (len > kMaxFrameBytes) {
@@ -430,6 +498,9 @@ std::vector<std::uint8_t> Channel::recvFrame(const std::shared_ptr<Impl>& impl) 
             std::vector<std::uint8_t> payload(static_cast<std::size_t>(len));
             if (!payload.empty()) {
                 boost::asio::read(*impl->socket, boost::asio::buffer(payload.data(), payload.size()));
+                impl->receivedBytes.fetch_add(
+                    static_cast<std::uint64_t>(payload.size()),
+                    std::memory_order_relaxed);
             }
             done->set_value(serialization::unpack(payload));
         } catch (...) {
@@ -511,9 +582,13 @@ void Channel::asyncSendBytes(
 
             std::uint64_t len = boost::endian::native_to_big(static_cast<std::uint64_t>(wire.size()));
             try {
-                localWriteExact(impl->localEndpoint, reinterpret_cast<const std::uint8_t*>(&len), sizeof(len));
+                localWriteExact(
+                    impl->localEndpoint,
+                    reinterpret_cast<const std::uint8_t*>(&len),
+                    sizeof(len),
+                    &impl->sentBytes);
                 if (!wire.empty()) {
-                    localWriteExact(impl->localEndpoint, wire.data(), wire.size());
+                    localWriteExact(impl->localEndpoint, wire.data(), wire.size(), &impl->sentBytes);
                 }
                 callback({});
             } catch (...) {
@@ -561,7 +636,12 @@ void Channel::asyncSendBytes(
                 *impl->strand,
                 [impl, header, wire, callback = std::move(callback)](
                     const boost::system::error_code& ec,
-                    std::size_t) mutable {
+                    std::size_t bytesTransferred) mutable {
+                    if (bytesTransferred != 0) {
+                        impl->sentBytes.fetch_add(
+                            static_cast<std::uint64_t>(bytesTransferred),
+                            std::memory_order_relaxed);
+                    }
                     callback(ec);
                 }));
     });
@@ -607,7 +687,11 @@ void Channel::asyncRecvBytes(
 
             std::uint64_t len = 0;
             try {
-                localReadExact(impl->localEndpoint, reinterpret_cast<std::uint8_t*>(&len), sizeof(len));
+                localReadExact(
+                    impl->localEndpoint,
+                    reinterpret_cast<std::uint8_t*>(&len),
+                    sizeof(len),
+                    &impl->receivedBytes);
             } catch (...) {
                 callback(makeClosedError(), {});
                 return;
@@ -622,7 +706,7 @@ void Channel::asyncRecvBytes(
             std::vector<std::uint8_t> payload(static_cast<std::size_t>(len));
             if (!payload.empty()) {
                 try {
-                    localReadExact(impl->localEndpoint, payload.data(), payload.size());
+                    localReadExact(impl->localEndpoint, payload.data(), payload.size(), &impl->receivedBytes);
                 } catch (...) {
                     callback(makeClosedError(), {});
                     return;
@@ -654,7 +738,12 @@ void Channel::asyncRecvBytes(
                 *impl->strand,
                 [impl, header, callback = std::move(callback)](
                     const boost::system::error_code& ec,
-                    std::size_t) mutable {
+                    std::size_t bytesTransferred) mutable {
+                    if (bytesTransferred != 0) {
+                        impl->receivedBytes.fetch_add(
+                            static_cast<std::uint64_t>(bytesTransferred),
+                            std::memory_order_relaxed);
+                    }
                     if (ec) {
                         callback(ec, {});
                         return;
@@ -685,9 +774,14 @@ void Channel::asyncRecvBytes(
                         boost::asio::buffer(payload->data(), payload->size()),
                         boost::asio::bind_executor(
                             *impl->strand,
-                            [payload, callback = std::move(callback)](
+                            [impl, payload, callback = std::move(callback)](
                                 const boost::system::error_code& readEc,
-                                std::size_t) mutable {
+                                std::size_t payloadBytesTransferred) mutable {
+                                if (payloadBytesTransferred != 0) {
+                                    impl->receivedBytes.fetch_add(
+                                        static_cast<std::uint64_t>(payloadBytesTransferred),
+                                        std::memory_order_relaxed);
+                                }
                                 if (readEc) {
                                     callback(readEc, {});
                                     return;

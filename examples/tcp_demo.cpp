@@ -39,6 +39,8 @@ int main() {
                     sendDone.set_value();
                 });
             sendDoneFuture.get();
+            std::cout << "server traffic tx/rx: " << serverChannel.sentBytes() << '/'
+                      << serverChannel.receivedBytes() << '\n';
         });
 
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -56,6 +58,8 @@ int main() {
             std::cout << ' ' << static_cast<int>(v);
         }
         std::cout << '\n';
+        std::cout << "client traffic tx/rx: " << clientChannel.sentBytes() << '/'
+                  << clientChannel.receivedBytes() << '\n';
 
         auto localPair = bnet::Channel::makeLocalPair("local_client", "local_server");
         auto& localClient = localPair.first;
@@ -69,6 +73,10 @@ int main() {
         std::string localReply;
         localClient.recvString(localReply);
         std::cout << "local client recv: " << localReply << '\n';
+        std::cout << "local client traffic tx/rx: " << localClient.sentBytes() << '/'
+                  << localClient.receivedBytes() << '\n';
+        std::cout << "local server traffic tx/rx: " << localServer.sentBytes() << '/'
+                  << localServer.receivedBytes() << '\n';
 
         serverThread.join();
 
